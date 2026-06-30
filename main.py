@@ -9,21 +9,21 @@ app = FastAPI()
 # 🔑 CONFIGURACIÓN DE CREDENCIALES REALES
 # =====================================================================
 GEMINI_API_KEY = "AQ.Ab8RN6KoAdpJ74sbGhbxEBAlrzvlQ6bRts9dBOxo_owqYvBwsw"
-WHATSAPP_TOKEN = "EAAXRTQQ8g9YBRwRvnBke3l0ZCh8TxEKQZB0k59oUjYOPAYRH9gQDOOsSTDl7W7dgec8GmK97yMbRrBAjZBZCcmpICSAyuVE1hLbT5Gyl9CIrHxsnnEjeEen8ZCTYGxV01xBIrdZADWpcJShZBSps64IsXD4HtaUUhsElY8cdLKwWYZCkSl6ZBfrRgP4cR6VCZCYDE2SIOqLJX9VaOvBMmpmyAn3tofro3QgKtosU1vjlwGzLAVZAyWNwYaOuhDD3YqZCuPDbS9xI64uZCh3LevTf9bGXzaXUj"
+WHATSAPP_TOKEN = "EAAXRTQQ8g9YBR7RpRl3dfZAUtjbxeGFWsELZCPKs6OSdBExunhj1RZBACKL775igIN9MbNvs0aoox7uVaiBHEuZALZBlYEdV5quX8B0ZBZBscZBvPGVRTcHjFUXITWKPSM3SgBl9aMJmkf23cwYngkY81S3B11TPUfcK9n5UZABriFqFnBUZC7sdsPdewSUl8DzdIi9H6xgDCpnfYVPxY5uyZACHaLU89JWGwbsLjGY3aFtZCblK0yxhAbUJXgqWZBcwPAliQr5uW2crNehPT9CQOs8s2tY2d" !
 PHONE_NUMBER_ID = "1629330904797588"
 
 # Inicializamos el "cerebro" de Google Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Base de datos temporal en memoria para el MVP (Guarda el estado de cada número de WhatsApp)
+# Base de datos temporal en memoria para el MVP
 BD_USUARIOS = {}
 
 def obtener_o_crear_usuario(id_whatsapp: str):
     if id_whatsapp not in BD_USUARIOS:
         BD_USUARIOS[id_whatsapp] = {
             "estado": "START",
-            "tipo_perfil": None, # 'PERSONAL' o 'NEGOCIO'
+            "tipo_perfil": None, 
             "ingresos": 0,
             "gastos_fijos": {},
             "deudas_bancarias": [],
@@ -35,51 +35,75 @@ def obtener_o_crear_usuario(id_whatsapp: str):
 # 💬 LÓGICA DE INTELIGENCIA ARTIFICIAL (GEMINI)
 # =====================================================================
 def consultar_a_gemini(instruccion_sistema: str, mensaje_usuario: str) -> str:
-    """Le consulta a Gemini enviándole un contexto y el mensaje del usuario."""
     try:
         prompt = f"{instruccion_sistema}\n\nUsuario dice: {mensaje_usuario}\nRespuesta abreviada y clara:"
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"Error llamando a Gemini: {e}")
+        print(f"❌ Error llamando a Gemini: {e}")
         return "Lo siento, tuve un pequeño problema técnico procesando tu mensaje. ¿Podrías repetirlo?"
 
 # =====================================================================
 # 🚀 WEBHOOK PRINCIPAL (Punto de contacto con Meta/WhatsApp)
 # =====================================================================
+@app.get("/")
+async def ruta_raiz():
+    """Agregamos esto para comprobar rápidamente en el navegador que el servidor responde"""
+    return {"status": "ALIO backend está corriendo con éxito en la raíz!"}
+
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
-    """Este método lo usa Meta solo una vez para validar que nuestro servidor existe."""
     params = request.query_params
-    verify_token = "alio_token_secreto_2026" # Este es el token que pondrás en Facebook Developers
+    verify_token = "alio_token_secreto_2026" 
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == verify_token:
+        print("✅ Webhook verificado con éxito por Meta!")
         return int(params.get("hub.challenge"))
     raise HTTPException(status_code=403, detail="Token de verificación inválido")
 
 @app.post("/webhook")
 async def recibir_mensaje_whatsapp(request: Request):
-    """Aquí llegan todos los chats de los usuarios en tiempo real."""
     body = await request.json()
     
-    # Intentar extraer el mensaje de texto y el número del remitente según el formato de Meta
+    # 🔍 LOG CONTROL: Esto imprimirá absolutamente todo lo que Meta mande a Render
+    print("📥 ¡LLEGÓ ALGO DESDE WHATSAPP! Datos recibidos:")
+    print(body)
+    
+    # Validar que sea una notificación válida de WhatsApp
+    if "entry" not in body:
+        return {"status": "no_es_un_evento_de_entry_valido"}
+
     try:
         entry = body["entry"][0]
         changes = entry["changes"][0]
         value = changes["value"]
+        
+        # Verificar si hay mensajes en el paquete
+        if "messages" not in value:
+            return {"status": "no_contiene_mensajes_nuevos"}
+            
         message = value["messages"][0]
         id_whatsapp = message["from"]
-        mensaje_usuario = message["text"]["body"].strip()
-    except KeyError:
-        return {"status": "no_es_mensaje_de_texto_o_formato_invalido"}
+        
+        # Asegurarnos de que el mensaje sea de tipo texto
+        if message.get("type") == "text":
+            mensaje_usuario = message["text"]["body"].strip()
+        else:
+            return {"status": "el_mensaje_no_es_texto_plano"}
+            
+    except Exception as e:
+        print(f"⚠️ Error procesando la estructura del JSON de Meta: {e}")
+        return {"status": "error_estructura_json"}
 
     usuario = obtener_o_crear_usuario(id_whatsapp)
     estado_actual = usuario["estado"]
     respuesta_bot = ""
 
-    # --- PASO 0: BIFURCACIÓN DE PERFIL (¡NUEVO!) ---
+    print(f"👤 Mensaje de [{id_whatsapp}] en estado [{estado_actual}]: '{mensaje_usuario}'")
+
+    # --- PASO 0: BIFURCACIÓN DE PERFIL ---
     if estado_actual == "START":
         respuesta_bot = (
-            "¡Hola! Soy *ALIO*, tu asistente y aliado financiero en WhatsApp. 🚀 "
+            "¡Hola! Soy *ALIO*, tu asistente y aliado financiero en WhatsApp. 🚀\n\n"
             "Para ayudarte a controlar mejor tu dinero, cuéntame:\n\n"
             "1️⃣ *Uso Personal* (Mis gastos diarios, arriendo, hogar, deudas propias).\n"
             "2️⃣ *Uso de Negocio* (Ventas de mi comercio, proveedores, arriendo del local, nómina).\n\n"
@@ -101,14 +125,13 @@ async def recibir_mensaje_whatsapp(request: Request):
 
     # --- PASO 1: INGRESOS ---
     elif estado_actual == "ESPERANDO_INGRESO":
-        # Usamos Gemini para extraer limpiamente el número sin importar cómo lo redacte el usuario
         instruccion = "Extrae únicamente el valor numérico entero del texto del usuario. Si dice 'gano 2 millones y medio' devuelve '2500000'. Si dice '1.200.000' devuelve '1200000'. Devuelve SOLO el número, absolutamente nada de texto adicional."
         monto_texto = consultar_a_gemini(instruccion, mensaje_usuario)
         
         try:
             usuario["ingresos"] = int(''.join(filter(str.isdigit, monto_texto)))
         except ValueError:
-            usuario["ingresos"] = 0 # En caso de fallo de extracción
+            usuario["ingresos"] = 0 
         
         if usuario["tipo_perfil"] == "PERSONAL":
             respuesta_bot = (
@@ -124,7 +147,7 @@ async def recibir_mensaje_whatsapp(request: Request):
             )
         usuario["estado"] = "ESPERANDO_GASTOS_FIJOS"
 
-    # --- PASO 2: GASTOS FIJOS (Análisis inteligente de Gemini) ---
+    # --- PASO 2: GASTOS FIJOS ---
     elif estado_actual == "ESPERANDO_GASTOS_FIJOS":
         instruccion = f"El usuario está configurando sus gastos fijos para un perfil {usuario['tipo_perfil']}. Extrae las categorías y montos mencionados y resume lo que entendiste de forma muy breve y amigable, confirmando los valores en una lista con viñetas limpias."
         resumen_ia = consultar_a_gemini(instruccion, mensaje_usuario)
@@ -166,13 +189,12 @@ async def recibir_mensaje_whatsapp(request: Request):
         )
         usuario["estado"] = "OPERATIVO"
 
-    # Enviar la respuesta de vuelta a través de la API oficial de Meta
+    # Enviar la respuesta de vuelta
     enviar_mensaje_whatsapp(id_whatsapp, respuesta_bot)
     return {"status": "success"}
 
 
 def enviar_mensaje_whatsapp(id_destino: str, texto: str):
-    """Función conectada a la API de Meta para enviar el mensaje al celular del usuario."""
     url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -186,6 +208,6 @@ def enviar_mensaje_whatsapp(id_destino: str, texto: str):
     }
     try:
         response = requests.post(url, json=payload, headers=headers)
-        print(f"Respuesta de envío WhatsApp: {response.status_code} - {response.text}")
+        print(f"📤 Respuesta de envío WhatsApp: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"Error enviando mensaje por WhatsApp: {e}")
+        print(f"❌ Error enviando mensaje por WhatsApp: {e}")
